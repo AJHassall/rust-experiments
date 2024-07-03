@@ -3,63 +3,55 @@
 mod timer;
 
 use std::fs;
-use std::sync::Arc;
 use std::sync::Mutex;
+use rayon::prelude::*;
 
-use std::fs::File;
-use std::io::prelude::*;
 use std::collections::HashMap;
 
 //const max: u32 = 9;
+trait WriteToFile {
+    fn write_to_file(&self, filename: &str);
+}
+impl WriteToFile for Vec<u32>{
+    fn write_to_file(&self, filename: &str) {
+        
+        let result = fs::write(filename, self
+            .iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<String>>()
+            .join("\n"));
+
+        match result {
+            Ok(_) => { println!("Writen to {}", filename)},
+            Err(_) =>{ println!("Error writing to file")}
+        }
+
+    }
+
+}
 
 fn main() {
-    
-    //generate_primes_threaded_rayon();
 
-    //generate_unique_numbers();
-    generate_primes_threaded(100000);
-    generate_primes(100000)
-    //test();
-  //  a_test();
-    //generate_primes();
-    //generate_primes_threaded_rayon();
-        
+    let mut max = 1_000_000_000;
+
+    generate_primes_threaded(max).write_to_file("filename.txt");
+    
+    generate_primes(max)
+        .write_to_file("generate_primes.txt");
+
+    let mut primes = generate_primes_threaded_rayon(max);
+    primes.sort();
+    primes.write_to_file("generate_primes_threaded_rayon.txt");
 }
 
-fn a_test(){
-
-    let mut handles = vec![];
-    let mut main_thread_vec = vec![];
-    for i in 0..10{
-
-        let h =std::thread::spawn(move || {
-            let mut spawned_thread_vec = vec![];
-            for j in 0..10{
-                spawned_thread_vec.push(j);
-            }
-            spawned_thread_vec
-        });
-        handles.push(h);
-
-
-    }
-
-    for h in handles{
-        main_thread_vec.extend(h.join().unwrap());
-    }
-
-
-    println!("{:?}", main_thread_vec);
-    
-}
 fn is_prime(n: u32) -> bool {
+
     if n <= 1 {
         return false;
-
+        
     }
-
     
-    for i in 2..n{
+    for i in 2..=((n as f64).sqrt() as u32){
         if n % i == 0 {
             return false;
         }
@@ -69,109 +61,103 @@ fn is_prime(n: u32) -> bool {
 }
 
 fn compare_is_even_methods() {
-    for j in 0..10{
-
-        println!("run {}",j);
-        {
+        {   
             let _t = timer::Timer::new();
+            {
+                for i in 0..10000000{
+                    is_even_mod(i);
+                }
+            }
             print!("mod:            ");
-            for i in 0..100000{
-                let _ =  is_even_mod(i);
-            }
         }
+        
 
         {
-            print!("bit wise and:   ");
             let _t = timer::Timer::new();
-            for i in 0..100000{
-                let _ =  is_even_bit_wise_and(i);
+            for i in 0..10000000{
+                is_even_bit_wise_and(i);
             }
+            print!("bit wise and:   ");
         }
 
         println!("=======");
-    }
 }
 
-fn generate_primes_threaded_rayon(max: u32) {
-    use rayon::prelude::*;
+fn generate_primes_threaded_rayon(max: u32)->Vec<u32> {
+    println!("Generating primes up to {max} with rayon");
 
-    println!("Generating primes with rayon");
     let _t = timer::Timer::new();
 
-    let primes: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
-
-    const THREADS: u32 = 10;
-    
-    let total_iterations = max / THREADS;
-    
-    (0..THREADS).into_par_iter().for_each(|offset| {
-        let primes_shared = Arc::clone(&primes);
-        let mut  i: u32 = 0;
-        while primes_shared.lock().unwrap().len() < total_iterations as usize {
-            let n = i + offset;
-            if is_prime(n) {
-                primes_shared.lock().unwrap().push(n);
-            }
-            i+=THREADS;
-        }
-    });
-
-    let _ =primes.lock().unwrap().iter().map(|s| println!("{}", s));
-    fs::write("primes_rayon.txt", primes.lock().unwrap().iter().map(|x| x.to_string()).collect::<Vec<String>>().join("\n")).unwrap();
+    (2..=max).into_par_iter()
+        .filter(|a|is_prime(*a))
+        .collect()
 }
 
 
-fn generate_primes_threaded(max: u32) {
-    println!("Generating primes with threads");
+use std::sync::{Arc};
+use std::thread;
+
+fn generate_primes_threaded(max: u32) -> Vec<u32> {
+    println!("Threaded execution");
 
     let _t = timer::Timer::new();
-    let mut handles = vec![];
-    let threads: u32 = 20;
 
-    let candidates_per_thread = max / threads;
+    let num_threads = 8;
 
-    for offset in 0..threads {
-        let handle = std::thread::spawn(move || {
+    // Calculate sub-range size
+    let sub_range_size = (max + num_threads - 1) / num_threads; // Ensure all numbers are covered
 
-            let mut primes = vec![];
-            for i in 0..candidates_per_thread{
-                let n =offset * candidates_per_thread  + i;
+    // Thread-safe container for final primes (empty initially)
+    let final_primes = Arc::new(Mutex::new(vec![]));
 
-                if  is_prime(n){
-                    primes.push(n);
+    // Spawn threads, each responsible for a sub-range
+    let threads = (0..num_threads)
+        .map(|thread_id| {
+            let start = thread_id * sub_range_size + 2; // Start from 2 (inclusive)
+            let end = (thread_id + 1) * sub_range_size; // End (exclusive)
+            let final_primes_clone = Arc::clone(&final_primes);
+
+            thread::spawn(move || {
+                let mut local_primes = vec![];
+                let mut candidate = start;
+                while candidate < end {
+                    let square_root = (candidate as f64).sqrt() as u32 + 1;
+                    let is_prime = (2..=square_root).all(|p| candidate % p != 0);
+                    if is_prime {
+                        local_primes.push(candidate);
+                    }
+                    candidate += 1;
                 }
-            }
-            primes
 
-        });
+                // Acquire lock once to append to final primes
+                let mut final_primes_lock = final_primes_clone.lock().unwrap();
+                final_primes_lock.append(&mut local_primes);
+            })
+        })
+        .collect::<Vec<_>>();
 
-        handles.push(handle);
+    threads.into_iter().for_each(|thread| thread.join().unwrap());
 
-        
-    }
+    // Extract and sort final primes
+    let mut final_primes_vec = final_primes.lock().unwrap().to_vec();
+    final_primes_vec.sort(); // Sort for efficiency if order matters
 
-  // let mut numnums =vec![];
-    for handle in handles {
-        let mut nums = handle.join().unwrap();
-     //   numnums.append(&mut nums)
-       // println!("{:?}", new_primes);
-    
-    }
-
-   // println!("{} primes", numnums.len());
-
+    final_primes_vec
 }
 
-fn generate_primes(max: u32) {
+
+
+
+
+fn generate_primes(max: u32) -> Vec<u32> {
     println!("Single thread");
     
     let _t = timer::Timer::new();
     let mut primes = vec![2];
 
     let mut candidate = 3;
-    while primes.len() < max as usize{
-        //println!("{}, {}", primes.len(), max);
-        let square_root = (candidate as f64).sqrt() as u64 + 1;
+    while candidate < max{
+        let square_root = (candidate as f64).sqrt() as u32 + 1;
 
         let is_prime = primes
             .iter()
@@ -183,12 +169,8 @@ fn generate_primes(max: u32) {
         }
         candidate += 2;
     }
-    
-    // fs::write("primes_single_thread.txt", primes
-    //     .iter()
-    //     .map(|x| x.to_string())
-    //     .collect::<Vec<String>>().join("\n"))
-    //     .unwrap();
+
+    primes
 }   
 
 fn generate_unique_numbers() {
@@ -235,23 +217,23 @@ fn is_even_bit_wise_and(n: i128) -> bool {
 
 #[test]
 fn test_is_prime() {
-    assert_eq!(true, is_prime(2));
-    assert_eq!(true, is_prime(313));
-    assert_eq!(false, is_prime(500));
-    assert_eq!(false, is_prime(3675));
+    assert!(is_prime(2));
+    assert!(is_prime(313));
+    assert!(!is_prime(500));
+    assert!(!is_prime(3675));
 }
 
 #[test]
 fn test_is_even_mod() {
-    assert_eq!(true, is_even_mod(2));
-    assert_eq!(true, is_even_mod(1000000));
-    assert_eq!(false, is_even_mod(503));
-    assert_eq!(false, is_even_mod(3675));
+    assert!(is_even_mod(2));
+    assert!(is_even_mod(1000000));
+    assert!(!is_even_mod(503));
+    assert!(!is_even_mod(3675));
 }
 #[test]
 fn test_is_even_bit_wise_and() {
-    assert_eq!(true, is_even_bit_wise_and(2));
-    assert_eq!(true, is_even_bit_wise_and(1000000));
-    assert_eq!(false, is_even_bit_wise_and(503));
-    assert_eq!(false, is_even_bit_wise_and(3675));
+    assert!(is_even_bit_wise_and(2));
+    assert!(is_even_bit_wise_and(1000000));
+    assert!(!is_even_bit_wise_and(503));
+    assert!(!is_even_bit_wise_and(3675));
 }
